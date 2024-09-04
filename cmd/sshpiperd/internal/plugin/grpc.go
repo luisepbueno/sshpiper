@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os/exec"
+	"regexp"
 	"strconv"
 
 	"github.com/google/uuid"
@@ -272,6 +273,31 @@ func (g *GrpcPlugin) UpstreamAuthFailureCallbackRemote(conn ssh.ConnMetadata, me
 	})
 }
 
+func createUpstreamChallenge(password string) ssh.KeyboardInteractiveChallenge {
+	return func(user string, instruction string, questions []string, echos []bool) ([]string, error) {
+		log.Debugf("== challenge")
+		answers := make([]string, 0)
+		pwPromptRegex, _ := regexp.Compile("[Pp]assword:")
+		duoPromptRegexp, _ := regexp.Compile("Passcode.*:")
+
+		log.Debugf(" == q: %s", questions)
+
+		for _, q := range questions {
+			// Password prompt
+			if m := pwPromptRegex.Match([]byte(q)); m {
+				answers = append(answers, password)
+			}
+
+			// DUO security prompt
+			if m := duoPromptRegexp.Match([]byte(q)); m {
+				answers = append(answers, "1")
+			}
+		}
+
+		return answers, nil
+	}
+}
+
 func (g *GrpcPlugin) createUpstream(conn ssh.ConnMetadata, challengeCtx ssh.ChallengeContext, upstream *libplugin.Upstream) (*ssh.Upstream, error) {
 	if upstream.GetNextPlugin() != nil {
 		if g.OnNextPlugin == nil {
@@ -321,6 +347,9 @@ func (g *GrpcPlugin) createUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Chal
 
 	config.SetDefaults()
 
+	config.Ciphers = append(config.Ciphers, "aes128-cbc")
+	config.KeyExchanges = append(config.KeyExchanges, "diffie-hellman-group1-sha1")
+
 	auth := make([]string, 0)
 	if upstream.GetNone() != nil {
 		config.Auth = append(config.Auth, ssh.NoneAuth())
@@ -328,8 +357,13 @@ func (g *GrpcPlugin) createUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Chal
 	}
 
 	if a := upstream.GetPassword(); a != nil {
-		config.Auth = append(config.Auth, ssh.Password(a.GetPassword()))
-		auth = append(auth, "password")
+		// config.Auth = append(config.Auth, ssh.Password(a.GetPassword()))
+		// auth = append(auth, "password")
+
+		// Replace password auth with keyboard-interactive auth
+		challenge := createUpstreamChallenge(a.GetPassword())
+		config.Auth = append(config.Auth, ssh.KeyboardInteractive(challenge))
+		auth = append(auth, "keyboard-interactive")
 	}
 
 	if a := upstream.GetPrivateKey(); a != nil {
